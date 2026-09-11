@@ -20,6 +20,7 @@ APPDATA = Path(os.environ.get('APPDATA') or Path.home() / 'AppData' / 'Roaming')
 CFG_PATH = APPDATA / 'ClaudeFloat' / 'config.json'  # not next to the script: a packaged exe unpacks to a temp dir
 PROJECTS = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude') / 'projects'
 DESKTOP = APPDATA / 'Claude' / 'claude-code-sessions'  # the desktop app's session list
+PIXEL_DIR = APPDATA / 'ClaudeFloat' / 'pixel-claude'  # the pixel's own sessions work here, away from your projects
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 ORANGE, BG, BG2, FG, DIM, KEY = '#D97757', '#262624', '#30302E', '#ECEBE6', '#9A9890', '#010203'
 RING = {'busy': '#FFB454', 'done': '#5BB974', 'error': '#E5534B'}
@@ -265,8 +266,10 @@ class App:
         except Exception:
             self.cfg = {}
         self.cfg.setdefault('perm', 'default')
+        self.to_pixel_session()  # every launch starts fresh in the pixel's own session
         self.state, self.tick, self.proc, self.q = 'idle', 0, None, queue.Queue()
         self.drawn = self.click_job = self.handed = None
+        self.pending = []  # prompts sent while a run was still finishing
         self.present = self.dbl = self.nod = self.munch = 0
 
         r = self.root = tk.Tk()
@@ -395,8 +398,9 @@ class App:
         m.add_command(label=f"세션: {self.cfg.get('title') or '(새 세션)'}"[:60], state='disabled')
         m.add_command(label=f"폴더: {self.session_dir()}"[:60], state='disabled')
         m.add_separator()
+        m.add_command(label='픽셀 전용 세션 (새 대화)', command=self.new_pixel_session)
         m.add_command(label='설정 / 세션 선택…', command=lambda: Settings(self))
-        m.add_command(label='새 세션…', command=self.new_session)
+        m.add_command(label='폴더 골라서 새 세션…', command=self.new_session)
         m.add_separator()
         self.auto_var = tk.BooleanVar(value=autostart())
         m.add_checkbutton(label='윈도우 시작 시 자동 실행', variable=self.auto_var,
@@ -421,7 +425,17 @@ class App:
     def session_dir(self):
         """Folder the selected session lives in now (falls back to the new-session folder)."""
         f = session_file(self.cfg.get('session'))
-        return (f and session_cwd(f)) or self.cfg.get('cwd') or str(Path.home())
+        return (f and session_cwd(f)) or self.cfg.get('cwd') or str(PIXEL_DIR)
+
+    def to_pixel_session(self):
+        """Point at a fresh pixel-only session; claude creates it on the first question."""
+        PIXEL_DIR.mkdir(parents=True, exist_ok=True)
+        self.cfg.update(session=None, cwd=str(PIXEL_DIR), title=f'픽셀 클로드 {datetime.now():%m-%d %H:%M}')
+
+    def new_pixel_session(self):
+        self.to_pixel_session()
+        self.save()
+        self.chat.reload()
 
     def new_session(self):
         d = filedialog.askdirectory(parent=self.root, title='새 세션 작업 폴더',
@@ -432,7 +446,9 @@ class App:
 
     # ---- claude process --------------------------------------------------
     def run(self, prompt):
-        if self.proc:
+        if self.proc:  # previous answer still streaming, or its stop hooks still running: send right after
+            self.pending.append(prompt)
+            self.chat.add('tool', '⏳ 앞 작업이 끝나면 이어서 보냅니다')
             return
         sid = self.cfg.get('session')
         if sid:
@@ -502,6 +518,7 @@ class App:
         self.q.put(('exit', proc.wait()))
 
     def stop(self):
+        self.pending.clear()
         if self.proc:
             self.proc.kill()
             self.chat.add('err', '(중지됨)')
@@ -516,20 +533,26 @@ class App:
                 self.set_state('error' if d else 'done')
             if self.state in ('done', 'error'):
                 winsound.MessageBeep(winsound.MB_ICONASTERISK if self.state == 'done' else winsound.MB_ICONHAND)
+            if self.pending:
+                self.run(self.pending.pop(0))
             return
         t = d.get('type')
         if d.get('session_id') and d['session_id'] != self.cfg.get('session'):
-            self.save(session=d['session_id'])
+            owned = self.cfg.get('owned', [])
+            if not self.cfg.get('session'):  # born here: tag it 픽셀 in the picker
+                owned = (owned + [d['session_id']])[-200:]
+            self.save(session=d['session_id'], owned=owned)
         if t == 'assistant':
             for x in d['message'].get('content', []):
                 if x.get('type') == 'text' and x['text'].strip():
                     self.chat.add('assistant', x['text'])
                 elif x.get('type') == 'tool_use':
                     self.chat.add('tool', tool_line(x))
-        elif t == 'result':
+        elif t == 'result':  # the answer is complete; the process may linger a bit for stop hooks
             if d.get('is_error'):
                 self.chat.add('err', str(d.get('result') or d.get('subtype')))
             self.set_state('error' if d.get('is_error') else 'done')
+            self.chat.busy(False)
 
     def _loop(self):
         while True:
@@ -721,7 +744,7 @@ class Chat:
             return 'break'
 
     def send(self):
-        if self.app.proc:
+        if self.app.proc and self.app.state == 'busy':  # the button reads 중지 only while answering
             return self.app.stop()
         text = self.inp.get('1.0', 'end').strip()
         if text:
@@ -785,7 +808,7 @@ class Quick:
 
     def send(self, e=None):
         text = self.e.get().strip()
-        if text and not self.app.proc:
+        if text:  # if Claude is still busy, run() queues it
             self.e.delete(0, 'end')
             self.win.withdraw()
             self.app.munch = 12  # gobbles the message, then trots off to work
@@ -839,12 +862,13 @@ class Settings:
         self.perm = ttk.Combobox(row, values=PERMS, state='readonly', width=18)
         self.perm.set(app.cfg['perm'])
         self.perm.pack(side='left', padx=8)
-        for label, cmd in (('취소', w.destroy), ('선택', self.ok), ('새 세션…', self.new)):
+        for label, cmd in (('취소', w.destroy), ('선택', self.ok), ('폴더 골라서 새 세션…', self.new)):
             tk.Button(row, text=label, command=cmd, bg=BG2, fg=FG, bd=0, padx=14, pady=4).pack(side='right', padx=4)
 
     def fill(self):
         """Sessions grouped under their folder, newest folder first; search filters and expands."""
         t, q, now, cur = self.tree, self.q.get().strip().lower(), time.time(), self.app.cfg.get('session')
+        owned = set(self.app.cfg.get('owned', []))
         t.delete(*t.get_children())
         groups = {}  # dict keeps insertion order = recency, since sessions come newest first
         for s in self.sessions:
@@ -859,7 +883,7 @@ class Settings:
                 t.insert(node, 'end', iid=s['id'],
                          text=('● ' if now - s['mtime'] < 120 else '    ') + s['title'],
                          values=(s['last'] if s['last'] != s['title'] else '',
-                                 '데스크톱' if s['desktop'] else 'CLI',
+                                 '픽셀' if s['id'] in owned else '데스크톱' if s['desktop'] else 'CLI',
                                  datetime.fromtimestamp(s['mtime']).strftime('%m-%d %H:%M')))
         if cur in self.by_id and t.exists(cur):
             t.selection_set(cur)
