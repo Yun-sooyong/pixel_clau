@@ -441,7 +441,7 @@ class App:
             local = desktop_sessions().get(sid, {}).get('sessionId')
             if local:
                 return self.handoff(prompt, local)
-        claude = shutil.which('claude')  # looked up per run: installing it doesn't need a restart
+        claude = shutil.which('claude')  # searches the PATH this process started with
         if not claude:
             self.chat.add('err', NO_CLI)
             return self.set_state('error')
