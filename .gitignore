@@ -1,0 +1,3 @@
+# per-user state: selected session, cwd, button position
+claude_float.json
+__pycache__/
