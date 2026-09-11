@@ -543,11 +543,15 @@ class Chat:
 
     def _watch(self):
         """While open, reload when the session file changes (turns from the desktop app / terminal)."""
-        if self.win.state() == 'normal' and not self.app.proc:
-            f = session_file(self.app.cfg.get('session'))
-            if f and f.stat().st_mtime != self.mtime:
-                self.reload()
-        self.win.after(1500, self._watch)
+        try:
+            if self.win.state() == 'normal' and not self.app.proc:
+                f = session_file(self.app.cfg.get('session'))
+                if f and f.stat().st_mtime != self.mtime:
+                    self.reload()
+        except Exception:
+            pass  # a half-written line or a file mid-move; try again next tick
+        finally:  # always reschedule, or live sync silently stops for good
+            self.win.after(1500, self._watch)
 
     def reload(self):
         cfg = self.app.cfg
