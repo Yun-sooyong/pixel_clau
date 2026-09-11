@@ -192,6 +192,9 @@ class App:
 
     def _press(self, e):
         self.drag = (e.x_root, e.y_root, self.root.winfo_x(), self.root.winfo_y())
+        # open popups ride along with the sprite (keeps the bubble tail pointing at it)
+        self.follow = [(w, w.winfo_x(), w.winfo_y()) for w in (self.chat.win, self.quick.win)
+                       if w.state() == 'normal']
         self.moved = self.long = False
         self.lp_job = self.root.after(LONG_PRESS_MS, self._long_press)
 
@@ -203,6 +206,8 @@ class App:
         self.moved = True
         self.root.after_cancel(self.lp_job)
         self.root.geometry(f'+{wx + dx}+{wy + dy}')
+        for w, x, y in self.follow:
+            w.geometry(f'+{x + dx}+{y + dy}')
 
     def _release(self, e):
         self.root.after_cancel(self.lp_job)
