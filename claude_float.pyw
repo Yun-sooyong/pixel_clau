@@ -5,7 +5,7 @@ double click: chat panel, popped out of the sprite
 drag        : move
 right click : menu (session select / new session / quit)
 """
-import ctypes, json, queue, re, shutil, subprocess, threading, time, winsound
+import ctypes, json, os, queue, re, shutil, subprocess, threading, time, winsound
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +18,7 @@ except Exception:
 
 CFG_PATH = Path(__file__).with_suffix('.json')
 PROJECTS = Path.home() / '.claude' / 'projects'
+DESKTOP = Path.home() / 'AppData' / 'Roaming' / 'Claude' / 'claude-code-sessions'  # desktop app's session list
 CLAUDE = shutil.which('claude') or 'claude'
 ORANGE, BG, BG2, FG, DIM, KEY = '#D97757', '#262624', '#30302E', '#ECEBE6', '#9A9890', '#010203'
 RING = {'busy': '#FFB454', 'done': '#5BB974', 'error': '#E5534B'}
@@ -64,11 +65,71 @@ def session_file(sid):
     return next(PROJECTS.glob(f'*/{sid}.jsonl'), None) if sid else None
 
 
-def list_sessions(limit=40):
+def session_cwd(f):
+    """Latest cwd recorded in a session file — sessions can move folders mid-way."""
+    with open(f, 'rb') as fh:
+        fh.seek(max(0, f.stat().st_size - 300_000))
+        tail = fh.read().decode('utf-8', 'replace')
+    m = re.findall(r'"cwd":("(?:[^"\\]|\\.)*")', tail)
+    return json.loads(m[-1]) if m else None
+
+
+def desktop_sessions():
+    """cliSessionId -> Claude desktop app metadata (sidebar title, cwd, isArchived)."""
+    out = {}
+    for f in DESKTOP.rglob('local_*.json'):
+        try:
+            d = json.loads(f.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if d.get('cliSessionId'):
+            out[d['cliSessionId']] = d
+    return out
+
+
+def conversation(f):
+    """(tag, text) items on the active branch: walk parentUuid back from the newest record.
+    Turns another client appended off to the side are skipped, same as Claude Code itself does."""
+    recs = []
+    with open(f, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            if '"uuid"' in line:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get('uuid') and not d.get('isSidechain'):
+                    recs.append(d)
+    by = {d['uuid']: d for d in recs}
+    chain, u = set(), recs[-1]['uuid'] if recs else None
+    while u in by and u not in chain:
+        chain.add(u)
+        u = by[u].get('parentUuid') or by[u].get('logicalParentUuid')
+    out = []
+    for d in recs:
+        if d['uuid'] not in chain:
+            continue
+        if m := msg_text(d):
+            out.append(m)
+        if d.get('type') == 'assistant':
+            out += [('tool', tool_line(x)) for x in d['message'].get('content', [])
+                    if isinstance(x, dict) and x.get('type') == 'tool_use']
+        a = d.get('attachment') or {}
+        if a.get('type') == 'queued_command' and isinstance(a.get('prompt'), str) \
+                and not a['prompt'].lstrip().startswith('<'):  # messages typed while Claude was busy
+            out.append(('user', a['prompt']))
+    return out
+
+
+def list_sessions(limit=60):
+    desk = desktop_sessions()
     files = [f for f in PROJECTS.glob('*/*.jsonl') if 'observer-sessions' not in f.parent.name]
     files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
     out = []
     for f in files[:limit]:
+        meta = desk.get(f.stem, {})
+        if meta.get('isArchived'):
+            continue
         title = cwd = first = last = None
         with open(f, encoding='utf-8', errors='replace') as fh:
             for line in fh:
@@ -87,10 +148,11 @@ def list_sessions(limit=40):
                 if (m := msg_text(d)) and m[0] == 'user':  # latest real prompt = what's in progress
                     first = first or m[1]
                     last = m[1]
+        cwd = meta.get('cwd') or session_cwd(f) or cwd
         if cwd:
             snip = lambda s: WRAPPERS.sub('', s or '').strip().replace('\n', ' ')[:70]
-            out.append({'id': f.stem, 'cwd': cwd, 'title': title or snip(first) or f.stem,
-                        'last': snip(last), 'mtime': f.stat().st_mtime})
+            out.append({'id': f.stem, 'cwd': cwd, 'title': meta.get('title') or title or snip(first) or f.stem,
+                        'last': snip(last), 'mtime': f.stat().st_mtime, 'desktop': bool(meta)})
     return out
 
 
@@ -195,6 +257,8 @@ class App:
         # open popups ride along with the sprite (keeps the bubble tail pointing at it)
         self.follow = [(w, w.winfo_x(), w.winfo_y()) for w in (self.chat.win, self.quick.win)
                        if w.state() == 'normal']
+        # remember now: the box's focus-out auto-hide fires before the click is handled
+        self.quick_open = self.quick.win.state() == 'normal'
         self.moved = self.long = False
         self.lp_job = self.root.after(LONG_PRESS_MS, self._long_press)
 
@@ -222,7 +286,10 @@ class App:
         self.click_job = None
         if self.state in ('done', 'error'):
             self.set_state('idle')
-        self.quick.show()
+        if self.quick_open:
+            self.quick.win.withdraw()
+        else:
+            self.quick.show()
 
     def _double(self, e):
         self.dbl = 1
@@ -237,12 +304,12 @@ class App:
 
     def _long_press(self):
         self.long = True
-        self.quick.show()
+        self._click()
 
     def _menu(self, e):
         m = tk.Menu(self.root, tearoff=0)
         m.add_command(label=f"세션: {self.cfg.get('title') or '(새 세션)'}"[:60], state='disabled')
-        m.add_command(label=f"폴더: {self.cfg.get('cwd') or Path.home()}"[:60], state='disabled')
+        m.add_command(label=f"폴더: {self.session_dir()}"[:60], state='disabled')
         m.add_separator()
         m.add_command(label='설정 / 세션 선택…', command=lambda: Settings(self))
         m.add_command(label='새 세션…', command=self.new_session)
@@ -263,6 +330,11 @@ class App:
         self.cfg.update(kw)
         CFG_PATH.write_text(json.dumps(self.cfg, ensure_ascii=False, indent=1), encoding='utf-8')
 
+    def session_dir(self):
+        """Folder the selected session lives in now (falls back to the new-session folder)."""
+        f = session_file(self.cfg.get('session'))
+        return (f and session_cwd(f)) or self.cfg.get('cwd') or str(Path.home())
+
     def new_session(self):
         d = filedialog.askdirectory(parent=self.root, title='새 세션 작업 폴더',
                                     initialdir=self.cfg.get('cwd') or str(Path.home()))
@@ -274,17 +346,24 @@ class App:
     def run(self, prompt):
         if self.proc:
             return
-        cwd = self.cfg.get('cwd')
-        if not cwd or not Path(cwd).is_dir():
+        sid = self.cfg.get('session')
+        cwd = self.session_dir()
+        if not Path(cwd).is_dir():
             cwd = str(Path.home())
         args = [CLAUDE, '-p', '--output-format', 'stream-json', '--verbose',
                 '--permission-mode', self.cfg['perm']]
-        if self.cfg.get('session'):
-            args += ['--resume', self.cfg['session']]
+        if sid:
+            args += ['--resume', sid]
+            # the desktop app never re-reads its open conversations, so writing into one would
+            # leave a branch it can't see — continue in a copy instead
+            if sid in desktop_sessions():
+                args.append('--fork-session')
+                self.chat.add('tool', '⑂ 데스크톱 앱 대화라서, 복사본(fork)으로 이어서 대화합니다')
         self.chat.add('user', prompt)
+        env = {k: v for k, v in os.environ.items() if k not in ('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT')}
         try:
             self.proc = subprocess.Popen(args, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                         stderr=subprocess.STDOUT, text=True, encoding='utf-8',
+                                         stderr=subprocess.STDOUT, text=True, encoding='utf-8', env=env,
                                          errors='replace', creationflags=subprocess.CREATE_NO_WINDOW)
         except OSError as ex:
             self.chat.add('err', f'claude 실행 실패: {ex}')
@@ -370,9 +449,10 @@ class Chat:
         self.head = tk.Label(self.box, bg=BG2, fg=DIM, anchor='w', padx=12, pady=8, font=(pixel_font(), 9),
                              cursor='fleur')
         self.head.pack(fill='x')
-        for wid in (self.head, self.cv):  # drag the bubble around by its header / frame
-            wid.bind('<ButtonPress-1>', lambda e: setattr(self, 'grab', (e.x_root - w.winfo_x(), e.y_root - w.winfo_y())))
-            wid.bind('<B1-Motion>', lambda e: w.geometry(f'+{e.x_root - self.grab[0]}+{e.y_root - self.grab[1]}'))
+        for wid in (self.head, self.cv):  # drag the bubble by its header / frame; the sprite rides along
+            wid.bind('<ButtonPress-1>', self._grab)
+            wid.bind('<B1-Motion>', self._drag)
+            wid.bind('<ButtonRelease-1>', lambda e: app.save(x=app.root.winfo_x(), y=app.root.winfo_y()))
         bottom = tk.Frame(self.box, bg=BG, padx=10, pady=10)
         bottom.pack(side='bottom', fill='x')
         self.inp = tk.Text(bottom, height=3, bg=BG2, fg=FG, insertbackground=FG, bd=0, wrap='word',
@@ -451,6 +531,16 @@ class Chat:
             c.create_rectangle(col_x(i), ty - hh * b / 2, col_x(i) + b, ty + hh * b / 2, fill=BG, width=0)
         self.box.place(x=ox + 2 * b, y=2 * b, width=w - 4 * b, height=H - 4 * b)
 
+    def _grab(self, e):
+        r = self.app.root
+        self.grab = (e.x_root, e.y_root, self.win.winfo_x(), self.win.winfo_y(), r.winfo_x(), r.winfo_y())
+
+    def _drag(self, e):
+        x0, y0, wx, wy, rx, ry = self.grab
+        dx, dy = e.x_root - x0, e.y_root - y0
+        self.win.geometry(f'+{wx + dx}+{wy + dy}')
+        self.app.root.geometry(f'+{rx + dx}+{ry + dy}')
+
     def _watch(self):
         """While open, reload when the session file changes (turns from the desktop app / terminal)."""
         if self.win.state() == 'normal' and not self.app.proc:
@@ -461,7 +551,7 @@ class Chat:
 
     def reload(self):
         cfg = self.app.cfg
-        self.head.config(text=f"{cfg.get('title') or '(새 세션)'}   ·   {cfg.get('cwd') or Path.home()}")
+        self.head.config(text=f"{cfg.get('title') or '(새 세션)'}   ·   {self.app.session_dir()}")
         self.log.config(state='normal')
         self.log.delete('1.0', 'end')
         self.log.config(state='disabled')
@@ -470,20 +560,8 @@ class Chat:
         if not f:
             return
         self.mtime = f.stat().st_mtime
-        msgs = []
-        with open(f, encoding='utf-8', errors='replace') as fh:
-            for line in fh:
-                if '"type":"user"' in line or '"type":"assistant"' in line:
-                    try:
-                        d = json.loads(line)
-                    except ValueError:
-                        continue
-                    if m := msg_text(d):
-                        msgs.append(m)
-                    if d.get('type') == 'assistant' and not d.get('isSidechain'):
-                        msgs += [('tool', tool_line(x)) for x in d['message'].get('content', [])
-                                 if isinstance(x, dict) and x.get('type') == 'tool_use']
-        for role, text in msgs[-80:]:
+        # ponytail: re-parses the whole file on every change; tail-parse if huge sessions lag
+        for role, text in conversation(f)[-80:]:
             self.add(role, text)
 
     def add(self, tag, text):
@@ -537,8 +615,6 @@ class Quick:
         self.e.bind('<Key>', lambda e: setattr(app, 'nod', 3), add='+')
 
     def show(self):
-        if self.win.state() == 'normal':
-            return self.win.withdraw()
         W = int(self.app.root.winfo_screenwidth() * 0.26)
         H = int(self.app.S * 0.95)
         b = max(2, self.app.S // 16)  # one "pixel" of the frame
@@ -584,31 +660,42 @@ class Settings:
         w.title('Claude Float 설정')
         w.configure(bg=BG, padx=12, pady=12)
         w.attributes('-topmost', True)
-        tk.Label(w, text='사용할 세션 (최근 수정순, 더블클릭으로 선택)', bg=BG, fg=FG,
-                 font=('Segoe UI', 10, 'bold')).pack(anchor='w')
-        frm = tk.Frame(w, bg=BG)
-        frm.pack(fill='both', expand=True, pady=6)
-        sb = ttk.Scrollbar(frm)
-        sb.pack(side='right', fill='y')
-        self.lb = tk.Listbox(frm, width=100, height=20, bg=BG2, fg=FG, bd=0, highlightthickness=0,
-                             selectbackground=ORANGE, font=('Segoe UI', 10), yscrollcommand=sb.set)
-        self.lb.pack(fill='both', expand=True)
-        sb.config(command=self.lb.yview)
-        self.lb.bind('<Double-Button-1>', lambda e: self.ok())
+        k = app.S / 64  # DPI scale
+        w.geometry(f'{int(980 * k)}x{int(620 * k)}')
 
-        self.sessions = list_sessions()
-        now = time.time()
-        for i, s in enumerate(self.sessions):
-            when = datetime.fromtimestamp(s['mtime']).strftime('%m-%d %H:%M')
-            live = '● 진행중' if now - s['mtime'] < 120 else '       '
-            recent = f"   ›  {s['last']}" if s['last'] and s['last'] != s['title'] else ''
-            self.lb.insert('end', f"{live}  {when}   [{Path(s['cwd']).name}]   {s['title']}{recent}")
-            if s['id'] == app.cfg.get('session'):
-                self.lb.selection_set(i)
-                self.lb.see(i)
+        top = tk.Frame(w, bg=BG)
+        top.pack(fill='x')
+        tk.Label(top, text='검색', bg=BG, fg=FG, font=('Segoe UI', 10, 'bold')).pack(side='left')
+        self.q = tk.StringVar()
+        ent = tk.Entry(top, textvariable=self.q, bg=BG2, fg=FG, insertbackground=FG, bd=0,
+                       font=('Segoe UI', 11), highlightthickness=1, highlightcolor=ORANGE)
+        ent.pack(side='left', fill='x', expand=True, padx=8, ipady=4)
+        tk.Label(top, text='폴더별 · 더블클릭으로 선택 · ● 진행중', bg=BG, fg=DIM).pack(side='right')
 
         row = tk.Frame(w, bg=BG)
-        row.pack(fill='x', pady=(6, 0))
+        row.pack(side='bottom', fill='x', pady=(6, 0))
+
+        st = ttk.Style(w)
+        st.theme_use('clam')
+        st.configure('Treeview', background=BG2, fieldbackground=BG2, foreground=FG, borderwidth=0,
+                     rowheight=int(26 * k), font=('Segoe UI', 10))
+        st.configure('Treeview.Heading', background=BG, foreground=DIM, borderwidth=0)
+        st.map('Treeview', background=[('selected', ORANGE)], foreground=[('selected', 'white')])
+        t = self.tree = ttk.Treeview(w, columns=('last', 'src', 'when'), show='tree headings')
+        for col, text, width in (('#0', '세션', 330), ('last', '최근 질문 / 경로', 380),
+                                 ('src', '출처', 70), ('when', '시간', 100)):
+            t.heading(col, text=text, anchor='w')
+            t.column(col, width=int(width * k), anchor='w', stretch=col in ('#0', 'last'))
+        t.tag_configure('folder', font=('Segoe UI', 10, 'bold'), foreground=ORANGE)
+        t.pack(fill='both', expand=True, pady=6)
+        t.bind('<Double-Button-1>', lambda e: self.ok() if t.focus() in self.by_id else None)
+        ent.bind('<Return>', lambda e: self.ok())
+
+        self.sessions = list_sessions()
+        self.by_id = {s['id']: s for s in self.sessions}
+        self.q.trace_add('write', lambda *a: self.fill())
+        self.fill()
+        ent.focus_set()
         tk.Label(row, text='권한 모드', bg=BG, fg=FG).pack(side='left')
         self.perm = ttk.Combobox(row, values=PERMS, state='readonly', width=18)
         self.perm.set(app.cfg['perm'])
@@ -616,11 +703,40 @@ class Settings:
         for label, cmd in (('취소', w.destroy), ('선택', self.ok), ('새 세션…', self.new)):
             tk.Button(row, text=label, command=cmd, bg=BG2, fg=FG, bd=0, padx=14, pady=4).pack(side='right', padx=4)
 
+    def fill(self):
+        """Sessions grouped under their folder, newest folder first; search filters and expands."""
+        t, q, now, cur = self.tree, self.q.get().strip().lower(), time.time(), self.app.cfg.get('session')
+        t.delete(*t.get_children())
+        groups = {}  # dict keeps insertion order = recency, since sessions come newest first
+        for s in self.sessions:
+            if not q or q in f"{s['title']} {s['last']} {s['cwd']}".lower():
+                groups.setdefault(s['cwd'], []).append(s)
+        for i, (cwd, ss) in enumerate(groups.items()):
+            live = any(now - s['mtime'] < 120 for s in ss)
+            node = t.insert('', 'end', text=f"{Path(cwd).name}  ({len(ss)}){'  ●' if live else ''}",
+                            values=(cwd, '', ''), tags=('folder',),
+                            open=bool(q) or i < 2 or any(s['id'] == cur for s in ss))
+            for s in ss:
+                t.insert(node, 'end', iid=s['id'],
+                         text=('● ' if now - s['mtime'] < 120 else '    ') + s['title'],
+                         values=(s['last'] if s['last'] != s['title'] else '',
+                                 '데스크톱' if s['desktop'] else 'CLI',
+                                 datetime.fromtimestamp(s['mtime']).strftime('%m-%d %H:%M')))
+        if cur in self.by_id and t.exists(cur):
+            t.selection_set(cur)
+            t.focus(cur)
+            t.see(t.parent(cur))  # keep its folder header in view too
+            t.see(cur)
+        elif q:  # first hit, so Enter picks it
+            first = next((c for n in t.get_children() for c in t.get_children(n)), None)
+            if first:
+                t.selection_set(first)
+                t.focus(first)
+
     def ok(self):
-        sel = self.lb.curselection()
         self.app.save(perm=self.perm.get())
-        if sel:
-            s = self.sessions[sel[0]]
+        s = self.by_id.get(self.tree.focus())
+        if s:
             self.app.save(session=s['id'], cwd=s['cwd'], title=s['title'])
             self.app.chat.reload()
         self.win.destroy()
