@@ -74,6 +74,22 @@ def session_cwd(f):
     return json.loads(m[-1]) if m else None
 
 
+def turn_state(f):
+    """'done' if the newest message is a finished assistant turn, else 'busy'."""
+    with open(f, 'rb') as fh:
+        fh.seek(max(0, f.stat().st_size - 300_000))
+        lines = fh.read().decode('utf-8', 'replace').splitlines()
+    for line in reversed(lines):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue  # half-written tail line
+        if d.get('isSidechain') or d.get('type') not in ('user', 'assistant'):
+            continue
+        return 'done' if (d.get('message') or {}).get('stop_reason') == 'end_turn' else 'busy'
+    return 'done'
+
+
 def desktop_sessions():
     """cliSessionId -> Claude desktop app metadata (sidebar title, cwd, isArchived)."""
     out = {}
@@ -164,7 +180,7 @@ class App:
             self.cfg = {}
         self.cfg.setdefault('perm', 'default')
         self.state, self.tick, self.proc, self.q = 'idle', 0, None, queue.Queue()
-        self.drawn = self.click_job = None
+        self.drawn = self.click_job = self.handed = None
         self.present = self.dbl = self.nod = self.munch = 0
 
         r = self.root = tk.Tk()
@@ -353,12 +369,12 @@ class App:
         args = [CLAUDE, '-p', '--output-format', 'stream-json', '--verbose',
                 '--permission-mode', self.cfg['perm']]
         if sid:
+            # the desktop app never re-reads its open conversations, and nothing outside it can
+            # post into one — so hand the prompt over to the app instead of writing behind its back
+            local = desktop_sessions().get(sid, {}).get('sessionId')
+            if local:
+                return self.handoff(prompt, local)
             args += ['--resume', sid]
-            # the desktop app never re-reads its open conversations, so writing into one would
-            # leave a branch it can't see — continue in a copy instead
-            if sid in desktop_sessions():
-                args.append('--fork-session')
-                self.chat.add('tool', '⑂ 데스크톱 앱 대화라서, 복사본(fork)으로 이어서 대화합니다')
         self.chat.add('user', prompt)
         env = {k: v for k, v in os.environ.items() if k not in ('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT')}
         try:
@@ -371,6 +387,32 @@ class App:
         self.set_state('busy')
         self.chat.busy(True)
         threading.Thread(target=self._reader, args=(self.proc, prompt), daemon=True).start()
+
+    def handoff(self, prompt, local):
+        """Prompt -> clipboard, open the session in the desktop app; the user pastes and sends there.
+        The chat bubble keeps mirroring the session file, and the sprite tracks the app's turn."""
+        self.root.clipboard_clear()
+        self.root.clipboard_append(prompt)
+        os.startfile(f'claude://code/continue?session={local}')
+        self.chat.add('tool', '↪ 앱으로 넘겼어요 — 앱 입력창에서 Ctrl+V, Enter')
+        self.handed = (self.cfg['session'], time.time())
+
+    def _check_handoff(self):
+        """busy once the pasted prompt lands in the session file, done when the app's turn ends."""
+        sid, since = self.handed
+        f = session_file(sid)
+        if not f or time.time() - since > 1800:  # never pasted: stop watching after 30 min
+            self.handed = None
+            return
+        if f.stat().st_mtime <= since:
+            return
+        st = turn_state(f)
+        if st == 'busy' and self.state != 'busy':
+            self.set_state('busy')
+        elif st == 'done' and self.state == 'busy':
+            self.handed = None
+            self.set_state('done')
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
 
     def _reader(self, proc, prompt):
         proc.stdin.write(prompt)  # prompt via stdin: no shell-escaping issues
@@ -420,6 +462,8 @@ class App:
             except queue.Empty:
                 break
         self.tick += 1
+        if self.handed and self.tick % 20 == 0:
+            self._check_handoff()
         self._draw()
         self.root.after(50, self._loop)
 

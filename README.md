@@ -23,5 +23,7 @@ pythonw claude_float.pyw
 
 ## 동작 방식
 선택한 세션의 작업 폴더에서 `claude -p --resume <세션ID> --output-format stream-json`을 실행하고, 프롬프트는 stdin으로 넘깁니다.
+단, **데스크톱 앱 세션**은 앱 밖에서 대화를 이어 쓸 수 없으므로 질문을 클립보드에 복사하고 `claude://code/continue?session=…`로
+앱에서 그 세션을 엽니다 (Ctrl+V, Enter). 픽셀 창은 세션 파일을 실시간으로 따라가고, 캐릭터는 앱의 처리중/완료를 표시합니다.
 세션 목록과 대화 기록은 `~/.claude/projects/*/*.jsonl`에서 읽습니다 (데스크톱 앱 세션 포함).
 설정(선택 세션, 위치, 권한 모드)은 스크립트 옆 `claude_float.json`에 저장됩니다.
