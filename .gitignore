@@ -1,4 +1,4 @@
-# per-user state (older versions kept it next to the script; now %APPDATA%\ClaudeFloat\config.json)
+# per-user state lives in %APPDATA%\pixel_clau\config.json (v1.0 kept claude_float.json here)
 claude_float.json
 __pycache__/
 # build output

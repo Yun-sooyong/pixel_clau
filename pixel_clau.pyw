@@ -1,4 +1,4 @@
-"""Claude Float — a pixel Claude that floats on top of Windows and talks to Claude Code.
+"""pixel_clau — a pixel Claude that floats on top of Windows and talks to Claude Code.
 
 click       : pixel prompt box (click again / Esc to close; long press opens it without the wait)
 double click: chat panel, popped out of the sprite (double click again to close)
@@ -16,11 +16,12 @@ try:
 except Exception:
     pass
 
+NAME, OLD_NAME = 'pixel_clau', 'ClaudeFloat'  # OLD_NAME: what v1.0-1.1 were called (settings / autostart)
 APPDATA = Path(os.environ.get('APPDATA') or Path.home() / 'AppData' / 'Roaming')
-CFG_PATH = APPDATA / 'ClaudeFloat' / 'config.json'  # not next to the script: a packaged exe unpacks to a temp dir
+CFG_PATH = APPDATA / NAME / 'config.json'  # not next to the script: a packaged exe unpacks to a temp dir
 PROJECTS = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude') / 'projects'
 DESKTOP = APPDATA / 'Claude' / 'claude-code-sessions'  # the desktop app's session list
-PIXEL_DIR = APPDATA / 'ClaudeFloat' / 'pixel-claude'  # the pixel's own sessions work here, away from your projects
+PIXEL_DIR = APPDATA / NAME / 'pixel-claude'  # the pixel's own sessions work here, away from your projects
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 ORANGE, BG, BG2, FG, DIM, KEY = '#D97757', '#262624', '#30302E', '#ECEBE6', '#9A9890', '#010203'
 RING = {'busy': '#FFB454', 'done': '#5BB974', 'error': '#E5534B'}
@@ -243,28 +244,31 @@ def autostart_cmd():
 
 
 def autostart(on=None):
-    """Read (on=None) or set whether Claude Float starts at login."""
+    """Read (on=None) or set whether pixel_clau starts at login."""
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
         if on is None:
             try:
-                return winreg.QueryValueEx(k, 'ClaudeFloat')[0] == autostart_cmd()
+                return winreg.QueryValueEx(k, NAME)[0] == autostart_cmd()
             except FileNotFoundError:
                 return False
         if on:
-            winreg.SetValueEx(k, 'ClaudeFloat', 0, winreg.REG_SZ, autostart_cmd())
-        else:
+            winreg.SetValueEx(k, NAME, 0, winreg.REG_SZ, autostart_cmd())
+        for name in ((OLD_NAME,) if on else (NAME, OLD_NAME)):  # never leave the old version launching too
             try:
-                winreg.DeleteValue(k, 'ClaudeFloat')
+                winreg.DeleteValue(k, name)
             except FileNotFoundError:
                 pass
 
 
 class App:
     def __init__(self):
-        try:
-            self.cfg = json.loads(CFG_PATH.read_text(encoding='utf-8'))
-        except Exception:
-            self.cfg = {}
+        self.cfg = {}
+        for p in (CFG_PATH, APPDATA / OLD_NAME / 'config.json'):  # carry settings over from v1.x
+            try:
+                self.cfg = json.loads(p.read_text(encoding='utf-8'))
+                break
+            except Exception:
+                pass
         self.cfg.setdefault('perm', 'default')
         self.to_pixel_session()  # every launch starts fresh in the pixel's own session
         self.state, self.tick, self.proc, self.q = 'idle', 0, None, queue.Queue()
@@ -273,7 +277,7 @@ class App:
         self.present = self.dbl = self.nod = self.munch = 0
 
         r = self.root = tk.Tk()
-        r.title('Claude Float')
+        r.title(NAME)
         self.S = int(64 * r.winfo_fpixels('1i') / 96)
         icon = tk.PhotoImage(width=18, height=18)  # title-bar icon for the picker / dialogs
         for x, y, w, h, col in sprite_rects():
@@ -819,7 +823,7 @@ class Settings:
     def __init__(self, app):
         self.app = app
         w = self.win = tk.Toplevel(app.root)
-        w.title('Claude Float 설정')
+        w.title(f'{NAME} 설정')
         w.configure(bg=BG, padx=12, pady=12)
         w.attributes('-topmost', True)
         k = app.S / 64  # DPI scale
@@ -912,7 +916,7 @@ class Settings:
 
 if __name__ == '__main__':
     k32 = ctypes.WinDLL('kernel32', use_last_error=True)
-    k32.CreateMutexW(None, False, 'Local\\ClaudeFloat')
+    k32.CreateMutexW(None, False, f'Local\\{NAME}')
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS: one sprite is plenty
         sys.exit()
     App().root.mainloop()

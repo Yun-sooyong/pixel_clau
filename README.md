@@ -1,4 +1,4 @@
-# Claude Float
+# pixel_clau
 
 Windows 화면 맨 앞에 떠 있는 픽셀 클로드. 클릭 한 번으로 [Claude Code](https://claude.com/claude-code)에게 질문하고,
 작업 중인지 · 끝났는지를 캐릭터의 움직임으로 알려 줍니다.
@@ -31,15 +31,15 @@ Windows 화면 맨 앞에 떠 있는 픽셀 클로드. 클릭 한 번으로 [Cla
 | 필요한 것 | 설명 |
 |---|---|
 | Windows 10 / 11 | Windows 전용입니다. |
-| **Claude Code (필수)** | [claude.com/claude-code](https://claude.com/claude-code)에서 설치한 뒤, 터미널에서 `claude`를 한 번 실행해 **로그인**해 두세요. Claude Float는 이 `claude` 명령으로 질문을 보냅니다. |
+| **Claude Code (필수)** | [claude.com/claude-code](https://claude.com/claude-code)에서 설치한 뒤, 터미널에서 `claude`를 한 번 실행해 **로그인**해 두세요. pixel_clau는 이 `claude` 명령으로 질문을 보냅니다. |
 | Claude 데스크톱 앱 (선택) | 설치되어 있으면 앱의 Code 세션도 목록에 나오고 함께 쓸 수 있습니다. ([10장](#10-데스크톱-앱-세션과-함께-쓰기)) |
 
 파이썬은 필요 없습니다 (exe 버전 기준).
 
 ## 2. 설치
 
-1. [Releases](../../releases/latest) 페이지에서 **`ClaudeFloat.exe`** 를 내려받습니다.
-2. 원하는 폴더(예: `C:\Tools\ClaudeFloat\`)에 넣습니다. 설치 과정은 없고 이 파일 하나가 전부입니다.
+1. [Releases](../../releases/latest) 페이지에서 **`pixel_clau.exe`** 를 내려받습니다.
+2. 원하는 폴더(예: `C:\Tools\pixel_clau\`)에 넣습니다. 설치 과정은 없고 이 파일 하나가 전부입니다.
 3. 더블 클릭해서 실행합니다.
 
 > **"Windows의 PC 보호" 창이 뜨면**
@@ -52,9 +52,9 @@ Windows 화면 맨 앞에 떠 있는 픽셀 클로드. 클릭 한 번으로 [Cla
 3. 캐릭터를 **한 번 클릭**하고 질문을 입력한 뒤 **Enter** — 끝입니다.
 
 > **픽셀 전용 세션**
-> Claude Float는 켤 때마다 **자기 전용 세션**을 새로 시작합니다. 빠른 질문은 모두 여기로 가고, 답도 픽셀 안에서 바로 받습니다.
+> pixel_clau는 켤 때마다 **자기 전용 세션**을 새로 시작합니다. 빠른 질문은 모두 여기로 가고, 답도 픽셀 안에서 바로 받습니다.
 > - 전용 세션은 첫 질문을 보낼 때 만들어지고, 그 뒤 질문들은 같은 대화로 이어집니다 (앞 내용을 기억해요).
-> - 작업 폴더는 `%APPDATA%\ClaudeFloat\pixel-claude` 입니다. 내 프로젝트 폴더와 섞이지 않아요.
+> - 작업 폴더는 `%APPDATA%\pixel_clau\pixel-claude` 입니다. 내 프로젝트 폴더와 섞이지 않아요.
 > - 켜 둔 채로 새 대화를 시작하려면 **오른쪽 클릭 → 픽셀 전용 세션 (새 대화)**.
 > - 특정 프로젝트에서 작업시키고 싶으면 [세션 고르기](#8-세션-고르기)나 [새 세션 만들기](#9-새-세션-만들기)를 쓰세요.
 
@@ -130,11 +130,11 @@ Windows 화면 맨 앞에 떠 있는 픽셀 클로드. 클릭 한 번으로 [Cla
 |---|---|
 | 세션 | 세션 이름. 데스크톱 앱 세션은 앱 사이드바와 같은 이름. 앞의 `●` = 최근 2분 안에 움직인 **진행 중** 세션 |
 | 최근 질문 / 경로 | 마지막으로 한 질문 (폴더 줄에서는 폴더 전체 경로) |
-| 출처 | `픽셀` = Claude Float가 만든 세션 · `데스크톱` = Claude 데스크톱 앱에서 만든 세션 · `CLI` = 터미널에서 만든 세션 |
+| 출처 | `픽셀` = pixel_clau가 만든 세션 · `데스크톱` = Claude 데스크톱 앱에서 만든 세션 · `CLI` = 터미널에서 만든 세션 |
 | 시간 | 마지막으로 바뀐 시각 |
 
 - 최근 60개 세션까지 보여 줍니다. 데스크톱 앱에서 보관(Archive)한 세션은 나오지 않습니다.
-- 고른 세션은 Claude Float를 끌 때까지 유지됩니다. 다시 켜면 새 픽셀 전용 세션으로 시작해요.
+- 고른 세션은 pixel_clau를 끌 때까지 유지됩니다. 다시 켜면 새 픽셀 전용 세션으로 시작해요.
 - 아래쪽 **권한 모드**도 여기서 바꿉니다. ([11장](#11-권한-모드))
 
 ## 9. 새 세션 만들기
@@ -150,7 +150,7 @@ Windows 화면 맨 앞에 떠 있는 픽셀 클로드. 클릭 한 번으로 [Cla
 평소 질문은 픽셀 전용 세션으로 가므로 이 장은 **세션 선택 창에서 `데스크톱` 세션을 직접 골랐을 때만** 해당합니다.
 
 Claude 데스크톱 앱에서 만든 세션은 **앱 밖에서 대화를 이어 쓸 수 없습니다.**
-그래서 이런 세션을 골라 두고 질문하면, 같은 대화로 이어지도록 Claude Float가 이렇게 넘겨 줍니다:
+그래서 이런 세션을 골라 두고 질문하면, 같은 대화로 이어지도록 pixel_clau가 이렇게 넘겨 줍니다:
 
 1. 질문이 **클립보드에 복사**되고, 데스크톱 앱에서 **그 세션이 자동으로 열립니다.**
 2. 앱 입력창에서 **Ctrl+V → Enter**.
@@ -160,11 +160,11 @@ Claude 데스크톱 앱에서 만든 세션은 **앱 밖에서 대화를 이어 
 - 30분 동안 붙여넣지 않으면 기다리기를 그만둡니다.
 - 앱에서 대화가 진행되는 걸 **보기만** 하고 싶을 때도, 그 세션을 골라 두고 채팅창을 열어 두면 됩니다.
 - 앱으로 넘어가는 게 번거로우면 **오른쪽 클릭 → 픽셀 전용 세션**으로 돌아오세요.
-- `픽셀` · `CLI` 세션은 이 과정 없이 Claude Float 안에서 바로 답을 받습니다.
+- `픽셀` · `CLI` 세션은 이 과정 없이 pixel_clau 안에서 바로 답을 받습니다.
 
 ## 11. 권한 모드
 
-Claude Float에서 보낸 질문은 사람이 옆에서 "허용"을 눌러 줄 수 없는 방식으로 실행됩니다.
+pixel_clau에서 보낸 질문은 사람이 옆에서 "허용"을 눌러 줄 수 없는 방식으로 실행됩니다.
 그래서 **Claude가 파일을 고치거나 명령을 실행해도 되는지**를 미리 정해 둡니다. (세션 선택 창 아래 **권한 모드**)
 
 | 모드 | Claude가 할 수 있는 것 | 추천 상황 |
@@ -174,7 +174,7 @@ Claude Float에서 보낸 질문은 사람이 옆에서 "허용"을 눌러 줄 �
 | `plan` | 계획만 세우고 아무것도 바꾸지 않음 | 작업 전에 방법부터 보고 싶을 때 |
 | `bypassPermissions` | **모든 작업을 묻지 않고 실행** | 결과를 이해하고 감당할 수 있을 때만 |
 
-- 권한 모드는 `CLI` 세션에만 적용됩니다. 데스크톱 앱 세션은 앱의 권한 설정을 따릅니다.
+- 권한 모드는 `픽셀` · `CLI` 세션에 적용됩니다. 데스크톱 앱 세션은 앱의 권한 설정을 따릅니다.
 - `bypassPermissions`는 파일 삭제나 명령 실행도 확인 없이 진행하니 주의하세요.
 
 ## 12. 윈도우 시작 시 자동 실행
@@ -186,30 +186,30 @@ Claude Float에서 보낸 질문은 사람이 옆에서 "허용"을 눌러 줄 �
 
 ## 13. 설정 파일과 초기화
 
-설정은 `%APPDATA%\ClaudeFloat\config.json` 에 저장됩니다. (탐색기 주소창에 `%APPDATA%\ClaudeFloat` 입력)
+설정은 `%APPDATA%\pixel_clau\config.json` 에 저장됩니다. (탐색기 주소창에 `%APPDATA%\pixel_clau` 입력)
 
 | 항목 | 내용 |
 |---|---|
 | `x`, `y` | 캐릭터 위치 |
 | `session`, `title`, `cwd` | 선택된 세션과 작업 폴더 (켤 때마다 픽셀 전용 세션으로 초기화) |
 | `perm` | 권한 모드 |
-| `owned` | Claude Float가 만든 세션 목록 (세션 선택 창의 `픽셀` 표시용) |
+| `owned` | pixel_clau가 만든 세션 목록 (세션 선택 창의 `픽셀` 표시용) |
 
-**초기화**: Claude Float를 종료한 뒤 이 파일을 지우고 다시 실행하면 처음 상태로 돌아갑니다.
+**초기화**: pixel_clau를 종료한 뒤 이 파일을 지우고 다시 실행하면 처음 상태로 돌아갑니다.
 (세션 기록 자체는 Claude Code 쪽에 있으므로 지워지지 않습니다.)
 
 ## 14. 문제 해결
 
 **채팅창에 "claude CLI를 찾을 수 없어요"가 떠요**
 Claude Code가 설치되지 않았거나 `claude` 명령을 찾을 수 없는 상태입니다. Claude Code를 설치하고 터미널에서 `claude`로 로그인하세요.
-Claude Float가 켜진 뒤에 설치했다면 **오른쪽 클릭 → 종료** 후 다시 실행해 주세요. (실행될 때의 PATH를 쓰기 때문)
+pixel_clau가 켜진 뒤에 설치했다면 **오른쪽 클릭 → 종료** 후 다시 실행해 주세요. (실행될 때의 PATH를 쓰기 때문)
 
 **"Failed to authenticate" 오류가 나요**
 로그인이 만료된 것입니다. 터미널에서 `claude`를 실행하고 `/login` 을 입력하세요.
 
 **캐릭터가 안 보여요**
-- 이미 실행 중인지 확인하세요. Claude Float는 하나만 실행됩니다 (두 번 실행해도 두 번째는 바로 꺼짐).
-- 모니터 구성을 바꿨다면 저장된 위치가 화면 밖일 수 있습니다. 작업 관리자에서 `ClaudeFloat`를 끝내고,
+- 이미 실행 중인지 확인하세요. pixel_clau는 하나만 실행됩니다 (두 번 실행해도 두 번째는 바로 꺼짐).
+- 모니터 구성을 바꿨다면 저장된 위치가 화면 밖일 수 있습니다. 작업 관리자에서 `pixel_clau`를 끝내고,
   `config.json`에서 `"x"`, `"y"` 줄을 지운 뒤 다시 실행하세요.
 
 **질문을 보냈는데 파일을 안 고쳐요**
@@ -228,7 +228,7 @@ Claude 데스크톱 앱이 설치되어 있어야 합니다. 앱 없이 쓰려�
 
 1. **오른쪽 클릭 → 윈도우 시작 시 자동 실행** 체크 해제
 2. **오른쪽 클릭 → 종료**
-3. `ClaudeFloat.exe` 와 `%APPDATA%\ClaudeFloat` 폴더를 지웁니다.
+3. `pixel_clau.exe` 와 `%APPDATA%\pixel_clau` 폴더를 지웁니다.
 
 Claude Code와 세션 기록에는 영향이 없습니다.
 
@@ -238,7 +238,7 @@ Claude Code와 세션 기록에는 영향이 없습니다.
 
 ### 소스로 실행
 ```
-pythonw claude_float.pyw
+pythonw pixel_clau.pyw
 ```
 Python 3.8+ 표준 라이브러리만 씁니다 (Windows).
 
@@ -248,11 +248,11 @@ python -m venv .venv-build
 .venv-build\Scripts\pip install pyinstaller pillow
 .venv-build\Scripts\python build.py
 ```
-→ `dist\ClaudeFloat.exe` (아이콘은 버튼과 같은 스프라이트 데이터로 생성)
+→ `dist\pixel_clau.exe` (아이콘은 버튼과 같은 스프라이트 데이터로 생성)
 
 ### 동작 방식
 - **픽셀 / CLI 세션**: 세션 폴더에서 `claude -p --resume <세션ID> --output-format stream-json` 실행. 프롬프트는 stdin으로 전달.
-  픽셀 전용 세션은 첫 질문 때 `--resume` 없이 `%APPDATA%\ClaudeFloat\pixel-claude`에서 만들어짐.
+  픽셀 전용 세션은 첫 질문 때 `--resume` 없이 `%APPDATA%\pixel_clau\pixel-claude`에서 만들어짐.
   답(`result`)이 오면 바로 다음 질문을 받되, 프로세스가 stop 훅 등으로 아직 살아 있으면 끝날 때까지 줄 세워 둠
   (같은 세션에 두 프로세스가 동시에 쓰지 않도록).
 - **데스크톱 앱 세션**: 질문을 클립보드에 넣고 `claude://code/continue?session=<앱 세션ID>` 링크로 앱에서 세션을 엶.
@@ -260,5 +260,5 @@ python -m venv .venv-build
 - **대화 기록**: `~/.claude/projects/*/*.jsonl` (또는 `CLAUDE_CONFIG_DIR`)을 **새로 추가된 부분만** 읽어서 따라감.
   다른 클라이언트가 옆가지로 붙인 대화는 건너뛰고, Claude Code처럼 현재 대화 줄기만 보여 줌.
 - **데스크톱 앱 세션 정보**: `%APPDATA%\Claude\claude-code-sessions` (앱 사이드바 제목, 폴더, 보관 여부)
-- **자동 실행**: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 의 `ClaudeFloat` 값
-- **중복 실행 방지**: 이름 있는 뮤텍스 `Local\ClaudeFloat`
+- **자동 실행**: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 의 `pixel_clau` 값
+- **중복 실행 방지**: 이름 있는 뮤텍스 `Local\pixel_clau`
