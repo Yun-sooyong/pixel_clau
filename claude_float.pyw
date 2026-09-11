@@ -1,11 +1,11 @@
-"""Claude Code floating button for Windows.  Run:  pythonw claude_float.pyw
+"""Claude Float — a pixel Claude that floats on top of Windows and talks to Claude Code.
 
-click       : pixel prompt box (long press does the same, without the wait)
-double click: chat panel, popped out of the sprite
-drag        : move
-right click : menu (session select / new session / quit)
+click       : pixel prompt box (click again / Esc to close; long press opens it without the wait)
+double click: chat panel, popped out of the sprite (double click again to close)
+drag        : move the sprite (open popups ride along); dragging the chat moves the sprite too
+right click : session picker, new session, run-at-login, quit
 """
-import ctypes, json, os, queue, re, shutil, subprocess, threading, time, winsound
+import ctypes, json, os, queue, re, shutil, subprocess, sys, threading, time, winreg, winsound
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -16,10 +16,11 @@ try:
 except Exception:
     pass
 
-CFG_PATH = Path(__file__).with_suffix('.json')
-PROJECTS = Path.home() / '.claude' / 'projects'
-DESKTOP = Path.home() / 'AppData' / 'Roaming' / 'Claude' / 'claude-code-sessions'  # desktop app's session list
-CLAUDE = shutil.which('claude') or 'claude'
+APPDATA = Path(os.environ.get('APPDATA') or Path.home() / 'AppData' / 'Roaming')
+CFG_PATH = APPDATA / 'ClaudeFloat' / 'config.json'  # not next to the script: a packaged exe unpacks to a temp dir
+PROJECTS = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude') / 'projects'
+DESKTOP = APPDATA / 'Claude' / 'claude-code-sessions'  # the desktop app's session list
+RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 ORANGE, BG, BG2, FG, DIM, KEY = '#D97757', '#262624', '#30302E', '#ECEBE6', '#9A9890', '#010203'
 RING = {'busy': '#FFB454', 'done': '#5BB974', 'error': '#E5534B'}
 PIX = {'B': ORANGE, 'L': '#E8A183', 'D': '#B9553A', 'E': '#2E2019'}
@@ -28,8 +29,10 @@ PERMS = ['default', 'acceptEdits', 'plan', 'bypassPermissions']
 LONG_PRESS_MS = 450
 TAIL = 7  # speech-bubble tail length, in frame pixels
 WRAPPERS = re.compile(r'<(system-reminder|command-[\w-]+|local-command-[\w-]+|[\w-]*hook[\w-]*)>.*?</\1>', re.S)
+NO_CLI = 'claude CLI를 찾을 수 없어요. Claude Code를 설치하고 터미널에서 `claude`로 한 번 로그인해 주세요.'
 
 
+# ---- reading Claude Code's session files -----------------------------------------------
 def msg_text(d):
     """(role, text) for a displayable user/assistant record, else None."""
     role = d.get('type')
@@ -52,13 +55,81 @@ def tool_line(x):
     return f"⚙ {x.get('name')}  {arg.strip().splitlines()[0][:70] if arg.strip() else ''}"
 
 
-def pixel_font(_cache=[]):
-    """First installed bitmap-ish font, else Consolas."""
-    if not _cache:
-        have = set(tkfont.families())
-        _cache.append(next((f for f in ('Galmuri11', 'DungGeunMo', 'Neo둥근모', 'Press Start 2P',
-                                        'Consolas') if f in have), 'Consolas'))
-    return _cache[0]
+def parse_node(line):
+    """(uuid, parent uuid, display items) for one transcript line, or None."""
+    try:
+        d = json.loads(line)
+    except ValueError:
+        return None
+    if not d.get('uuid') or d.get('isSidechain'):
+        return None
+    items = [m] if (m := msg_text(d)) else []
+    if d.get('type') == 'assistant':
+        items += [('tool', tool_line(x)) for x in (d.get('message') or {}).get('content') or []
+                  if isinstance(x, dict) and x.get('type') == 'tool_use']
+    a = d.get('attachment') or {}
+    if a.get('type') == 'queued_command' and isinstance(a.get('prompt'), str) \
+            and not a['prompt'].lstrip().startswith('<'):  # messages typed while Claude was busy
+        items.append(('user', a['prompt']))
+    return d['uuid'], d.get('parentUuid') or d.get('logicalParentUuid'), items
+
+
+class Transcript:
+    """A session file parsed incrementally: each refresh reads only the bytes appended since the last,
+    and keeps just (uuid, parent, items) per record — not the full JSON — so big sessions stay cheap."""
+
+    def __init__(self, f):
+        self.f, self.pos, self.nodes = f, 0, []
+
+    def refresh(self):
+        if self.f.stat().st_size < self.pos:  # rewritten rather than appended: start over
+            self.pos, self.nodes = 0, []
+        with open(self.f, 'rb') as fh:  # streamed line by line: never holds the whole file in memory
+            fh.seek(self.pos)
+            for raw in fh:
+                if not raw.endswith(b'\n'):  # half-written last line: picked up on the next refresh
+                    break
+                self.pos += len(raw)
+                if b'"uuid"' in raw and (node := parse_node(raw)):
+                    self.nodes.append(node)
+
+    def items(self):
+        """(tag, text) on the active branch: walk parents back from the newest record, skipping turns
+        another client appended off to the side — the same way Claude Code resolves a conversation."""
+        parent = {u: p for u, p, _ in self.nodes}
+        chain, u = set(), self.nodes[-1][0] if self.nodes else None
+        while u in parent and u not in chain:
+            chain.add(u)
+            u = parent[u]
+        return [x for u, _, its in self.nodes if u in chain for x in its]
+
+
+def tail_records(f, nbytes=300_000):
+    """Parsed records from the last `nbytes` of a session file, newest first."""
+    with open(f, 'rb') as fh:
+        fh.seek(max(0, f.stat().st_size - nbytes))
+        lines = fh.read().decode('utf-8', 'replace').splitlines()
+    for line in reversed(lines):
+        try:
+            yield json.loads(line)
+        except ValueError:
+            continue  # the chunk's cut-off first line, or a half-written last one
+
+
+def head_info(f):
+    """(first real prompt, first cwd), reading from the top only as far as needed."""
+    first = cwd = None
+    with open(f, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            if '"cwd"' in line or '"type":"user"' in line:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                cwd = cwd or d.get('cwd')
+                if (m := msg_text(d)) and m[0] == 'user':
+                    return m[1], cwd
+    return first, cwd
 
 
 def session_file(sid):
@@ -67,26 +138,14 @@ def session_file(sid):
 
 def session_cwd(f):
     """Latest cwd recorded in a session file — sessions can move folders mid-way."""
-    with open(f, 'rb') as fh:
-        fh.seek(max(0, f.stat().st_size - 300_000))
-        tail = fh.read().decode('utf-8', 'replace')
-    m = re.findall(r'"cwd":("(?:[^"\\]|\\.)*")', tail)
-    return json.loads(m[-1]) if m else None
+    return next((d['cwd'] for d in tail_records(f) if d.get('cwd')), None)
 
 
 def turn_state(f):
     """'done' if the newest message is a finished assistant turn, else 'busy'."""
-    with open(f, 'rb') as fh:
-        fh.seek(max(0, f.stat().st_size - 300_000))
-        lines = fh.read().decode('utf-8', 'replace').splitlines()
-    for line in reversed(lines):
-        try:
-            d = json.loads(line)
-        except ValueError:
-            continue  # half-written tail line
-        if d.get('isSidechain') or d.get('type') not in ('user', 'assistant'):
-            continue
-        return 'done' if (d.get('message') or {}).get('stop_reason') == 'end_turn' else 'busy'
+    for d in tail_records(f):
+        if d.get('type') in ('user', 'assistant') and not d.get('isSidechain'):
+            return 'done' if (d.get('message') or {}).get('stop_reason') == 'end_turn' else 'busy'
     return 'done'
 
 
@@ -103,73 +162,100 @@ def desktop_sessions():
     return out
 
 
-def conversation(f):
-    """(tag, text) items on the active branch: walk parentUuid back from the newest record.
-    Turns another client appended off to the side are skipped, same as Claude Code itself does."""
-    recs = []
-    with open(f, encoding='utf-8', errors='replace') as fh:
-        for line in fh:
-            if '"uuid"' in line:
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                if d.get('uuid') and not d.get('isSidechain'):
-                    recs.append(d)
-    by = {d['uuid']: d for d in recs}
-    chain, u = set(), recs[-1]['uuid'] if recs else None
-    while u in by and u not in chain:
-        chain.add(u)
-        u = by[u].get('parentUuid') or by[u].get('logicalParentUuid')
-    out = []
-    for d in recs:
-        if d['uuid'] not in chain:
-            continue
-        if m := msg_text(d):
-            out.append(m)
-        if d.get('type') == 'assistant':
-            out += [('tool', tool_line(x)) for x in d['message'].get('content', [])
-                    if isinstance(x, dict) and x.get('type') == 'tool_use']
-        a = d.get('attachment') or {}
-        if a.get('type') == 'queued_command' and isinstance(a.get('prompt'), str) \
-                and not a['prompt'].lstrip().startswith('<'):  # messages typed while Claude was busy
-            out.append(('user', a['prompt']))
-    return out
-
-
 def list_sessions(limit=60):
+    """Recent sessions, newest first. Reads each file's tail (title, latest prompt, cwd) and only
+    goes to the top for a CLI session that has no title yet."""
     desk = desktop_sessions()
     files = [f for f in PROJECTS.glob('*/*.jsonl') if 'observer-sessions' not in f.parent.name]
     files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    snip = lambda s: WRAPPERS.sub('', s or '').strip().replace('\n', ' ')[:70]
     out = []
     for f in files[:limit]:
         meta = desk.get(f.stem, {})
         if meta.get('isArchived'):
             continue
-        title = cwd = first = last = None
-        with open(f, encoding='utf-8', errors='replace') as fh:
-            for line in fh:
-                if not ('"custom-title"' in line or '"last-prompt"' in line or '"type":"user"' in line
-                        or (cwd is None and '"cwd"' in line)):
-                    continue
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                if d.get('type') == 'custom-title':
-                    title = d.get('customTitle')
-                elif d.get('type') == 'last-prompt':
+        title, last, cwd = meta.get('title'), None, meta.get('cwd')
+        for d in tail_records(f):
+            cwd = cwd or d.get('cwd')
+            title = title or (d.get('customTitle') if d.get('type') == 'custom-title' else None)
+            if last is None:
+                if d.get('type') == 'last-prompt':
                     last = d.get('lastPrompt')
-                cwd = cwd or d.get('cwd')
-                if (m := msg_text(d)) and m[0] == 'user':  # latest real prompt = what's in progress
-                    first = first or m[1]
+                elif (m := msg_text(d)) and m[0] == 'user':
                     last = m[1]
-        cwd = meta.get('cwd') or session_cwd(f) or cwd
+            if cwd and title and last:
+                break
+        if not (title and cwd):
+            first, cwd0 = head_info(f)
+            title, cwd = title or snip(first), cwd or cwd0
         if cwd:
-            snip = lambda s: WRAPPERS.sub('', s or '').strip().replace('\n', ' ')[:70]
-            out.append({'id': f.stem, 'cwd': cwd, 'title': meta.get('title') or title or snip(first) or f.stem,
-                        'last': snip(last), 'mtime': f.stat().st_mtime, 'desktop': bool(meta)})
+            out.append({'id': f.stem, 'cwd': cwd, 'title': title or f.stem, 'last': snip(last),
+                        'mtime': f.stat().st_mtime, 'desktop': bool(meta)})
     return out
+
+
+# ---- look & feel ------------------------------------------------------------------------
+def sprite_rects(dy=0, blink=False, step=0, mood='idle', look=0, mouth=False):
+    """Pixel Claude as (x, y, w, h, color) cells on an 18x18 grid — shared by the button and the icon."""
+    out = []
+
+    def px(x, y, w=1, h=1, col='B'):
+        out.append((x + 1 + look, y + dy + 2, w, h, PIX[col]))  # whole body leans toward the prompt box
+
+    for i, x in enumerate((2, 6, 9, 13)):  # legs
+        px(x, 12, 2, 3 if i % 2 == step else 2, 'D')
+    for y, x, w in BODY:
+        px(x, y, w, 1)
+    px(1, 1, 1, 9, 'L')                      # left highlight
+    px(1, 11, 14, 1, 'D')                    # bottom shade
+    lx, rx = 3 + look, 9 + look  # eyes
+    if blink:
+        px(lx, 6, 3, 1, 'E')
+        px(rx, 6, 3, 1, 'E')
+    elif mood == 'done':  # ^ ^
+        px(lx, 6, 3, 1, 'E')
+        px(lx + 1, 5, 1, 1, 'E')
+        px(rx, 6, 3, 1, 'E')
+        px(rx + 1, 5, 1, 1, 'E')
+    else:
+        px(lx, 5, 3, 3, 'E')
+        px(rx, 5, 3, 3, 'E')
+    if mouth:  # munch
+        px(6 + look, 8, 4, 2, 'E')
+    return out
+
+
+def pixel_font(_cache=[]):
+    """First installed bitmap-ish font, else Consolas."""
+    if not _cache:
+        have = set(tkfont.families())
+        _cache.append(next((f for f in ('Galmuri11', 'DungGeunMo', 'Neo둥근모', 'Press Start 2P',
+                                        'Consolas') if f in have), 'Consolas'))
+    return _cache[0]
+
+
+# ---- run at login (per-user Run key, no admin needed) -------------------------------------
+def autostart_cmd():
+    if getattr(sys, 'frozen', False):  # packaged exe
+        return f'"{sys.executable}"'
+    return f'"{Path(sys.executable).with_name("pythonw.exe")}" "{Path(__file__).resolve()}"'
+
+
+def autostart(on=None):
+    """Read (on=None) or set whether Claude Float starts at login."""
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
+        if on is None:
+            try:
+                return winreg.QueryValueEx(k, 'ClaudeFloat')[0] == autostart_cmd()
+            except FileNotFoundError:
+                return False
+        if on:
+            winreg.SetValueEx(k, 'ClaudeFloat', 0, winreg.REG_SZ, autostart_cmd())
+        else:
+            try:
+                winreg.DeleteValue(k, 'ClaudeFloat')
+            except FileNotFoundError:
+                pass
 
 
 class App:
@@ -184,7 +270,13 @@ class App:
         self.present = self.dbl = self.nod = self.munch = 0
 
         r = self.root = tk.Tk()
+        r.title('Claude Float')
         self.S = int(64 * r.winfo_fpixels('1i') / 96)
+        icon = tk.PhotoImage(width=18, height=18)  # title-bar icon for the picker / dialogs
+        for x, y, w, h, col in sprite_rects():
+            icon.put(col, to=(x, y, x + w, y + h))
+        self.icon = icon.zoom(2)
+        r.iconphoto(True, self.icon)
         W, H = r.winfo_screenwidth(), r.winfo_screenheight()
         r.overrideredirect(True)
         r.attributes('-topmost', True)
@@ -227,38 +319,14 @@ class App:
 
     def _draw(self):
         key = self._frame()
-        if key == self.drawn:
+        if key == self.drawn:  # redraw only when the frame actually changes
             return
         self.drawn = key
-        dy, blink, step, mood, look, mouth = key
         c, S, p = self.cv, self.S, self.S / 18  # 18-unit grid: headroom for the hop
         c.delete('all')
-
-        def px(x, y, w=1, h=1, col='B'):
-            x, y = x + 1 + look, y + dy + 2  # whole body leans toward the prompt box
-            c.create_rectangle(x * p, y * p, (x + w) * p, (y + h) * p, fill=PIX[col], width=0)
-
-        for i, x in enumerate((2, 6, 9, 13)):  # legs
-            px(x, 12, 2, 3 if i % 2 == step else 2, 'D')
-        for y, x, w in BODY:
-            px(x, y, w, 1)
-        px(1, 1, 1, 9, 'L')                      # left highlight
-        px(1, 11, 14, 1, 'D')                    # bottom shade
-        lx, rx = 3 + look, 9 + look  # eyes
-        if blink:
-            px(lx, 6, 3, 1, 'E')
-            px(rx, 6, 3, 1, 'E')
-        elif mood == 'done':  # ^ ^
-            px(lx, 6, 3, 1, 'E')
-            px(lx + 1, 5, 1, 1, 'E')
-            px(rx, 6, 3, 1, 'E')
-            px(rx + 1, 5, 1, 1, 'E')
-        else:
-            px(lx, 5, 3, 3, 'E')
-            px(rx, 5, 3, 3, 'E')
-        if mouth:  # munch
-            px(6 + look, 8, 4, 2, 'E')
-
+        for x, y, w, h, col in sprite_rects(*key):
+            c.create_rectangle(x * p, y * p, (x + w) * p, (y + h) * p, fill=col, width=0)
+        mood, step = key[3], key[2]
         # status badge: pulses while busy, blinks when done / failed
         if mood != 'idle' and not (mood != 'busy' and (self.tick // 8) % 2):
             r, cx = (2.8 + 0.5 * step) * p, S - 3.2 * p
@@ -330,6 +398,9 @@ class App:
         m.add_command(label='설정 / 세션 선택…', command=lambda: Settings(self))
         m.add_command(label='새 세션…', command=self.new_session)
         m.add_separator()
+        self.auto_var = tk.BooleanVar(value=autostart())
+        m.add_checkbutton(label='윈도우 시작 시 자동 실행', variable=self.auto_var,
+                          command=lambda: autostart(self.auto_var.get()))
         m.add_command(label='종료', command=self.quit)
         m.tk_popup(e.x_root, e.y_root)
 
@@ -344,6 +415,7 @@ class App:
     # ---- session / config ------------------------------------------------
     def save(self, **kw):
         self.cfg.update(kw)
+        CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CFG_PATH.write_text(json.dumps(self.cfg, ensure_ascii=False, indent=1), encoding='utf-8')
 
     def session_dir(self):
@@ -363,17 +435,21 @@ class App:
         if self.proc:
             return
         sid = self.cfg.get('session')
-        cwd = self.session_dir()
-        if not Path(cwd).is_dir():
-            cwd = str(Path.home())
-        args = [CLAUDE, '-p', '--output-format', 'stream-json', '--verbose',
-                '--permission-mode', self.cfg['perm']]
         if sid:
             # the desktop app never re-reads its open conversations, and nothing outside it can
             # post into one — so hand the prompt over to the app instead of writing behind its back
             local = desktop_sessions().get(sid, {}).get('sessionId')
             if local:
                 return self.handoff(prompt, local)
+        claude = shutil.which('claude')  # looked up per run: installing it doesn't need a restart
+        if not claude:
+            self.chat.add('err', NO_CLI)
+            return self.set_state('error')
+        cwd = self.session_dir()
+        if not Path(cwd).is_dir():
+            cwd = str(Path.home())
+        args = [claude, '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', self.cfg['perm']]
+        if sid:
             args += ['--resume', sid]
         self.chat.add('user', prompt)
         env = {k: v for k, v in os.environ.items() if k not in ('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT')}
@@ -476,7 +552,7 @@ class Chat:
     """Chat panel drawn as a pixel speech bubble whose tail points at the sprite."""
 
     def __init__(self, app):
-        self.app, self.last_role, self.mtime = app, None, None
+        self.app, self.last_role, self.mtime, self.tr, self.shown = app, None, None, None, None
         W, H = app.root.winfo_screenwidth(), app.root.winfo_screenheight()
         self.size = int(W * 0.3125), int(H * 0.9)  # FHD: 600x972 ≈ 28% of screen
         self.b = max(3, app.S // 16)               # one frame "pixel"
@@ -593,26 +669,40 @@ class Chat:
                 if f and f.stat().st_mtime != self.mtime:
                     self.reload()
         except Exception:
-            pass  # a half-written line or a file mid-move; try again next tick
+            pass  # a file mid-move; try again next tick
         finally:  # always reschedule, or live sync silently stops for good
             self.win.after(1500, self._watch)
 
     def reload(self):
         cfg = self.app.cfg
         self.head.config(text=f"{cfg.get('title') or '(새 세션)'}   ·   {self.app.session_dir()}")
-        self.log.config(state='normal')
-        self.log.delete('1.0', 'end')
-        self.log.config(state='disabled')
-        self.last_role = None
         f = session_file(cfg.get('session'))
         if not f:
+            self.tr = None
+        elif not self.tr or self.tr.f != f:
+            self.tr = Transcript(f)
+        items = []
+        if self.tr:
+            self.mtime = f.stat().st_mtime
+            self.tr.refresh()  # reads only what was appended since last time
+            items = self.tr.items()[-80:]
+        if (f, items) == self.shown:  # only bookkeeping records changed: leave the view alone
             return
-        self.mtime = f.stat().st_mtime
-        # ponytail: re-parses the whole file on every change; tail-parse if huge sessions lag
-        for role, text in conversation(f)[-80:]:
-            self.add(role, text)
+        self.shown = (f, items)
+        L = self.log
+        at_end, top = L.yview()[1] > 0.98, L.yview()[0]
+        L.config(state='normal')
+        L.delete('1.0', 'end')
+        L.config(state='disabled')
+        self.last_role = None
+        for role, text in items:
+            self.add(role, text, scroll=False)
+        if at_end:
+            L.see('end')
+        else:  # you scrolled up to read: stay there
+            L.yview_moveto(top)
 
-    def add(self, tag, text):
+    def add(self, tag, text, scroll=True):
         L = self.log
         L.config(state='normal')
         role = 'user' if tag == 'user' else 'assistant'
@@ -622,7 +712,8 @@ class Chat:
             self.last_role = role
         L.insert('end', text.strip() + '\n', () if tag in ('user', 'assistant') else tag)
         L.config(state='disabled')
-        L.see('end')
+        if scroll:
+            L.see('end')
 
     def _enter(self, e):
         if not e.state & 0x1:  # Shift+Enter = newline
@@ -796,4 +887,8 @@ class Settings:
 
 
 if __name__ == '__main__':
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.CreateMutexW(None, False, 'Local\\ClaudeFloat')
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS: one sprite is plenty
+        sys.exit()
     App().root.mainloop()

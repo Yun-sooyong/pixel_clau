@@ -1,3 +1,7 @@
-# per-user state: selected session, cwd, button position
+# per-user state (older versions kept it next to the script; now %APPDATA%\ClaudeFloat\config.json)
 claude_float.json
 __pycache__/
+# build output
+.venv-build/
+build/
+dist/
