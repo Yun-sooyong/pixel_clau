@@ -5,7 +5,7 @@ double click: chat panel, popped out of the sprite (double click again to close)
 drag        : move the sprite (open popups ride along); dragging the chat moves the sprite too
 right click : session picker, new session, run-at-login, quit
 """
-import ctypes, json, os, queue, re, shutil, subprocess, sys, threading, time, winreg, winsound
+import ctypes, json, os, queue, re, shutil, struct, subprocess, sys, threading, time, traceback, winreg, winsound
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +23,9 @@ PROJECTS = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude') 
 DESKTOP = APPDATA / 'Claude' / 'claude-code-sessions'  # the desktop app's session list
 PIXEL_DIR = APPDATA / NAME / 'pixel-claude'  # the pixel's own sessions work here, away from your projects
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
+APPROVED_KEY = r'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
+ICON = APPDATA / NAME / 'pixel_clau.ico'
+LOG = APPDATA / NAME / 'error.log'
 ORANGE, BG, BG2, FG, DIM, KEY = '#D97757', '#262624', '#30302E', '#ECEBE6', '#9A9890', '#010203'
 RING = {'busy': '#FFB454', 'done': '#5BB974', 'error': '#E5534B'}
 PIX = {'B': ORANGE, 'L': '#E8A183', 'D': '#B9553A', 'E': '#2E2019'}
@@ -236,28 +239,82 @@ def pixel_font(_cache=[]):
     return _cache[0]
 
 
-# ---- run at login (per-user Run key, no admin needed) -------------------------------------
-def autostart_cmd():
+# ---- launching: run at login, Start menu / desktop icons (per-user, no admin needed) --------
+def launch_target():
+    """(program, arguments) that start this copy of pixel_clau."""
     if getattr(sys, 'frozen', False):  # packaged exe
-        return f'"{sys.executable}"'
-    return f'"{Path(sys.executable).with_name("pythonw.exe")}" "{Path(__file__).resolve()}"'
+        return sys.executable, ''
+    return str(Path(sys.executable).with_name('pythonw.exe')), f'"{Path(__file__).resolve()}"'
+
+
+def autostart_cmd():
+    prog, args = launch_target()
+    return f'"{prog}" {args}'.strip()
 
 
 def autostart(on=None):
     """Read (on=None) or set whether pixel_clau starts at login."""
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
+    hk = winreg.HKEY_CURRENT_USER
+    with winreg.OpenKey(hk, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k, \
+            winreg.CreateKey(hk, APPROVED_KEY) as a:
         if on is None:
             try:
-                return winreg.QueryValueEx(k, NAME)[0] == autostart_cmd()
+                enabled = winreg.QueryValueEx(a, NAME)[0][0] % 2 == 0  # odd first byte = disabled in Task Manager
+            except (FileNotFoundError, IndexError):
+                enabled = False
+            try:
+                return enabled and winreg.QueryValueEx(k, NAME)[0] == autostart_cmd()
             except FileNotFoundError:
                 return False
         if on:
             winreg.SetValueEx(k, NAME, 0, winreg.REG_SZ, autostart_cmd())
-        for name in ((OLD_NAME,) if on else (NAME, OLD_NAME)):  # never leave the old version launching too
-            try:
-                winreg.DeleteValue(k, name)
-            except FileNotFoundError:
-                pass
+            # Windows skips a Run entry that has no "enabled" record here (seen on this Win 11 build)
+            winreg.SetValueEx(a, NAME, 0, winreg.REG_BINARY, b'\x02' + bytes(11))
+        for key, names in ((k, (OLD_NAME,) if on else (NAME, OLD_NAME)), (a, () if on else (NAME,))):
+            for name in names:  # never leave the old version launching too
+                try:
+                    winreg.DeleteValue(key, name)
+                except FileNotFoundError:
+                    pass
+
+
+def write_icon(path, k=4):
+    """The idle sprite as a .ico (32-bit BMP payload) — stdlib only, for the script version's shortcuts."""
+    n = 18 * k
+    px = [[b'\0\0\0\0'] * n for _ in range(n)]
+    for x, y, w, h, col in sprite_rects():
+        bgra = bytes((int(col[5:7], 16), int(col[3:5], 16), int(col[1:3], 16), 255))
+        for yy in range(y * k, (y + h) * k):
+            for xx in range(x * k, (x + w) * k):
+                px[yy][xx] = bgra
+    pixels = b''.join(b''.join(row) for row in reversed(px))  # BMP rows go bottom-up
+    mask = bytes((n + 31) // 32 * 4 * n)
+    dib = struct.pack('<IiiHHIIiiII', 40, n, 2 * n, 1, 32, 0, len(pixels) + len(mask), 0, 0, 0, 0) + pixels + mask
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(struct.pack('<HHHBBBBHHII', 0, 1, 1, n, n, 0, 0, 1, 32, len(dib), 22) + dib)
+
+
+def make_shortcut(where):
+    """Create a pixel_clau shortcut in 'Programs' (Start menu) or 'Desktop' — the real, possibly
+    OneDrive-redirected folder, which is why Windows is asked for it rather than guessing."""
+    prog, args = launch_target()
+    icon = prog if getattr(sys, 'frozen', False) else str(ICON)
+    if icon == str(ICON):
+        write_icon(ICON)
+    ps = ("$l = Join-Path ([Environment]::GetFolderPath($env:PC_WHERE)) ($env:PC_NAME + '.lnk');"
+          "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($l);"
+          "$s.TargetPath = $env:PC_PROG; $s.Arguments = $env:PC_ARGS; $s.IconLocation = $env:PC_ICON;"
+          "$s.WorkingDirectory = Split-Path $env:PC_PROG; $s.Description = 'pixel Claude for Claude Code'; $s.Save()")
+    env = dict(os.environ, PC_WHERE=where, PC_NAME=NAME, PC_PROG=prog, PC_ARGS=args, PC_ICON=icon)
+    subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps], env=env,
+                   creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+
+
+def log_error(*exc):
+    """pythonw has no console: keep tracebacks where they can be found."""
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG, 'a', encoding='utf-8') as fh:
+        fh.write(f'--- {datetime.now():%Y-%m-%d %H:%M:%S}\n' + ''.join(traceback.format_exception(*exc)))
 
 
 class App:
@@ -409,6 +466,8 @@ class App:
         self.auto_var = tk.BooleanVar(value=autostart())
         m.add_checkbutton(label='윈도우 시작 시 자동 실행', variable=self.auto_var,
                           command=lambda: autostart(self.auto_var.get()))
+        m.add_command(label='바탕화면에 아이콘 만들기',
+                      command=lambda: threading.Thread(target=make_shortcut, args=('Desktop',), daemon=True).start())
         m.add_command(label='종료', command=self.quit)
         m.tk_popup(e.x_root, e.y_root)
 
@@ -919,4 +978,10 @@ if __name__ == '__main__':
     k32.CreateMutexW(None, False, f'Local\\{NAME}')
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS: one sprite is plenty
         sys.exit()
-    App().root.mainloop()
+    sys.excepthook = log_error
+    programs = Path(os.environ.get('APPDATA', '')) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs'
+    if not (programs / f'{NAME}.lnk').exists():  # so it can always be found in the Start menu
+        threading.Thread(target=make_shortcut, args=('Programs',), daemon=True).start()
+    app = App()
+    app.root.report_callback_exception = log_error
+    app.root.mainloop()
